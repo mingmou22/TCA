@@ -30,7 +30,7 @@ def load_image(img_path, img_size=224, device='cpu'):
 
 
 def compute_enhanced_features(img):
-    """计算图像内容特征"""
+    
     img_np = img.permute(1, 2, 0).cpu().numpy()
     gray = cv2.cvtColor((img_np * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
 
@@ -56,13 +56,9 @@ def compute_enhanced_features(img):
     return torch.from_numpy(features).float()
 
 
-# ==================== 修复：确保大扰动幅度的解码器 ====================
 
 class MagnitudeEnhancedDecoder(nn.Module):
-    """
-    关键修复：确保颜色通道同向，避免相互抵消
-    同时增大扰动幅度
-    """
+    
     def __init__(self, hidden_dim=128, content_dim=5):
         super().__init__()
 
@@ -98,7 +94,7 @@ class MagnitudeEnhancedDecoder(nn.Module):
             nn.Linear(32, 1)
         )
 
-        # 关键修复：颜色网络添加约束，确保同向
+        
         self.color_net = nn.Sequential(
             nn.Linear(combined_dim, 128),
             nn.LayerNorm(128),
@@ -109,12 +105,12 @@ class MagnitudeEnhancedDecoder(nn.Module):
             nn.Linear(64, 3)
         )
 
-        # 颜色方向网络：确保三通道同向
+        
         self.color_direction = nn.Sequential(
             nn.Linear(combined_dim, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
-            nn.Tanh()  # -1 或 1，决定整体方向
+            nn.Tanh()  
         )
 
         self.alpha_net = nn.Sequential(
@@ -148,28 +144,28 @@ class MagnitudeEnhancedDecoder(nn.Module):
         scale_raw = self.scale_net(combined)
         rotation_raw = self.rotation_net(combined)
         color_raw = self.color_net(combined)
-        color_dir = self.color_direction(combined)  # [N, 1], -1或1
+        color_dir = self.color_direction(combined)  
         alpha_raw = self.alpha_net(combined).squeeze(-1)
 
-        # 提取内容特征
+        
         edges = content_features[:, 0]
         structure = content_features[:, 1]
         corners = content_features[:, 3]
 
-        # 关键修复：颜色 = 原始颜色 * 方向，确保三通道同向
-        color_magnitude = torch.tanh(color_raw) * 0.8  # 增大幅度到0.8
-        # 广播方向到3通道
-        color = color_magnitude * color_dir  # 所有通道同号
+        
+        color_magnitude = torch.tanh(color_raw) * 0.8  
+        
+        color = color_magnitude * color_dir  
 
-        # 内容重要性
+        
         content_importance = torch.clamp(edges + structure + corners, 0, 1)
 
-        # Alpha：重要区域0.75-0.95
+        
         alpha_base = torch.sigmoid(alpha_raw)
         alpha = 0.15 + 0.8 * content_importance + 0.1 * alpha_base
         alpha = torch.clamp(alpha, 0.15, 0.95)
 
-        # 尺度
+        
         scale_base = torch.clamp(F.softplus(scale_raw) * 3 + 3, min=2, max=20)
         scale_factor = 1.2 - 0.6 * content_importance.unsqueeze(-1)
         scale = scale_base * scale_factor
@@ -181,14 +177,11 @@ class MagnitudeEnhancedDecoder(nn.Module):
             'offset': torch.tanh(offset_raw) * 14,
             'scale': scale,
             'rotation': rotation,
-            'color': color,  # 关键：同向颜色
+            'color': color,  
             'alpha': alpha,
             'content_importance': content_importance,
-            'color_direction': color_dir  # 用于调试
+            'color_direction': color_dir  
         }
-
-
-# ==================== 光栅化器 ====================
 
 class MagnitudeRasterizer2D(nn.Module):
     def __init__(self, image_size=(224, 224)):
@@ -235,11 +228,11 @@ class MagnitudeRasterizer2D(nn.Module):
         if importance_weights is not None:
             alpha = alpha * importance_weights.view(-1)
 
-        # 不归一化
+        
         weighted_color = torch.einsum('nhw,n,nk->hwk', weights, alpha, colors)
         perturbation = weighted_color
 
-        # 检查颜色方向一致性
+        
         pert_mean_per_channel = perturbation.mean(dim=(0,1))
         print(f"  Perturbation per channel mean: R={pert_mean_per_channel[0]:.4f}, "
               f"G={pert_mean_per_channel[1]:.4f}, B={pert_mean_per_channel[2]:.4f}")
@@ -250,7 +243,6 @@ class MagnitudeRasterizer2D(nn.Module):
         return perturbation.permute(2, 0, 1).unsqueeze(0)
 
 
-# ==================== GNN ====================
 
 class MagnitudeEnhancedGNN(nn.Module):
     def __init__(self, in_dim, hidden=128, K=2, n_layers=3, content_dim=5):
@@ -304,7 +296,7 @@ class MagnitudeEnhancedGNN(nn.Module):
 
 
 def image_to_patches(img, patch_size=16, stride=8, mask=None):
-    """提取patch并计算内容特征"""
+    
     C, H, W = img.shape
     device = img.device
 
@@ -353,8 +345,6 @@ def image_to_patches(img, patch_size=16, stride=8, mask=None):
 
     return node_feats, edge_index, idx_map, content_feats
 
-
-# ==================== 攻击函数 ====================
 
 def magnitude_enhanced_attack(
     img: torch.Tensor,
@@ -422,23 +412,23 @@ def magnitude_enhanced_attack(
         if torch.isnan(perturbation).any():
             continue
 
-        # 关键指标：扰动幅度
+        
         pert_magnitude = perturbation.abs().mean()
         pert_max = perturbation.abs().max()
         pert_std = perturbation.std()
 
-        # L∞约束（软）
+       
         perturbation_clamped = torch.clamp(perturbation, -adv_eps, adv_eps)
         budget_penalty = (perturbation.abs() - adv_eps).clamp(min=0).mean() * 10.0
 
-        # 关键修复：鼓励大扰动幅度
-        magnitude_reward = pert_magnitude * 100.0  # 奖励大平均幅度
-        max_reward = pert_max * 50.0  # 奖励大最大值
+        
+        magnitude_reward = pert_magnitude * 100.0  
+        max_reward = pert_max * 50.0  
 
         perturbation = torch.clamp(perturbation, -adv_eps, adv_eps)
         adv_img_batch = torch.clamp(img.unsqueeze(0) + perturbation, 0, 1)
 
-        # 内容对齐
+        
         edge_map = content_feats[:, 0]
         structure_map = content_feats[:, 1]
         corner_map = content_feats[:, 3]
@@ -446,12 +436,12 @@ def magnitude_enhanced_attack(
         structure_alignment = (perturbation.abs().mean(dim=(1,2,3)) * structure_weight).mean()
         structure_loss = -structure_alignment * 40.0
 
-        # 多样性
+        
         spatial_loss = -pert_std * 60.0
         alpha_std_loss = -alpha.std() * 40.0
         color_std_loss = -colors.std(dim=0).mean() * 20.0
 
-        # 内容-Alpha对齐
+       
         content_align_loss = -(alpha * structure_weight).mean() * 25.0
 
         loss = (structure_loss + spatial_loss + alpha_std_loss + color_std_loss +
@@ -503,7 +493,6 @@ def magnitude_enhanced_attack(
     return final_adv_img, final_perturbation, final_params, base_positions, imp_weight, content_feats
 
 
-# ==================== 增强可视化（修复纯色问题）====================
 
 def visualize_fixed_results(image, adv_img, perturbation, gaussian_params, base_positions, content_feats,
                              adv_eps=0.08, save_path='fixed_visualization.png'):
@@ -522,7 +511,7 @@ def visualize_fixed_results(image, adv_img, perturbation, gaussian_params, base_
     if pert_np.shape[0] == 3:
         pert_np = pert_np.transpose(1, 2, 0)
 
-    # 重建内容图
+   
     H, W = img_np.shape[:2]
     patch_size = 16
     stride = 8
@@ -539,34 +528,34 @@ def visualize_fixed_results(image, adv_img, perturbation, gaussian_params, base_
     diff = np.abs(adv_np - img_np)
     diff_max = diff.max()
 
-    # 关键修复：计算各通道差异
+    
     diff_r = np.abs(adv_np[:,:,0] - img_np[:,:,0])
     diff_g = np.abs(adv_np[:,:,1] - img_np[:,:,1])
     diff_b = np.abs(adv_np[:,:,2] - img_np[:,:,2])
 
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
 
-    # 1. Original
+    
     axes[0, 0].imshow(np.clip(img_np, 0, 1))
     axes[0, 0].set_title('Original', fontweight='bold')
     axes[0, 0].axis('off')
 
-    # 2. Adversarial
+   
     axes[0, 1].imshow(np.clip(adv_np, 0, 1))
     axes[0, 1].set_title('Adversarial', fontweight='bold')
     axes[0, 1].axis('off')
 
-    # 3. Content Importance
+    
     im_imp = axes[0, 2].imshow(importance_img, cmap='hot')
     axes[0, 2].set_title('Content Importance', fontweight='bold')
     axes[0, 2].axis('off')
     plt.colorbar(im_imp, ax=axes[0, 2], fraction=0.046)
 
-    # 4. Perturbation Mean - 关键修复：使用自适应对比度
+    
     pert_mean = pert_np.mean(axis=2) if pert_np.shape[2] == 3 else pert_np
     pert_min, pert_max = pert_mean.min(), pert_mean.max()
 
-    # 如果范围太小，强制放大显示
+   
     display_range = max(abs(pert_min), abs(pert_max), 0.001)
     im_pert = axes[0, 3].imshow(pert_mean, cmap='RdBu_r',
                                  vmin=-display_range, vmax=display_range)
@@ -576,7 +565,7 @@ def visualize_fixed_results(image, adv_img, perturbation, gaussian_params, base_
     axes[0, 3].axis('off')
     plt.colorbar(im_pert, ax=axes[0, 3], fraction=0.046)
 
-    # 5. Perturbation L2
+    
     if pert_np.shape[2] == 3:
         pert_l2 = np.sqrt(np.sum(pert_np ** 2, axis=2))
     else:
@@ -587,16 +576,15 @@ def visualize_fixed_results(image, adv_img, perturbation, gaussian_params, base_
     axes[1, 0].axis('off')
     plt.colorbar(im_l2, ax=axes[1, 0], fraction=0.046)
 
-    # 6. Difference - 关键修复：显示各通道差异
-    # 使用彩色显示差异
+
     diff_color = np.stack([diff_r, diff_g, diff_b], axis=2)
-    diff_color = diff_color / (diff_color.max() + 1e-8)  # 归一化
+    diff_color = diff_color / (diff_color.max() + 1e-8)  
 
     axes[1, 1].imshow(diff_color)
     axes[1, 1].set_title(f'Difference (RGB)\nMax: {diff_max:.4f}', fontweight='bold')
     axes[1, 1].axis('off')
 
-    # 7. Gaussians
+    
     axes[1, 2].imshow(importance_img, cmap='gray', alpha=0.3)
     axes[1, 2].imshow(np.clip(img_np, 0, 1), alpha=0.2)
 
@@ -657,7 +645,6 @@ def visualize_fixed_results(image, adv_img, perturbation, gaussian_params, base_
     plt.show()
 
 
-# ==================== 主程序 ====================
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
